@@ -136,11 +136,11 @@ impl<'i> Target for IrisGdbStub<'i> {
         BaseOps::SingleThread(self)
     }
 
-    fn breakpoints(&mut self) -> Option<BreakpointsOps<Self>> {
+    fn breakpoints(&mut self) -> Option<BreakpointsOps<'_, Self>> {
         Some(self)
     }
 
-    fn monitor_cmd(&mut self) -> Option<MonitorCmdOps<Self>> {
+    fn monitor_cmd(&mut self) -> Option<MonitorCmdOps<'_, Self>> {
         Some(self)
     }
 }
@@ -242,11 +242,11 @@ impl SingleThreadOps for IrisGdbStub<'_> {
 }
 
 impl<'i> Breakpoints for IrisGdbStub<'i> {
-    fn hw_breakpoint(&mut self) -> Option<HwBreakpointOps<Self>> {
+    fn hw_breakpoint(&mut self) -> Option<HwBreakpointOps<'_, Self>> {
         Some(self)
     }
 
-    fn sw_breakpoint(&mut self) -> Option<SwBreakpointOps<Self>> {
+    fn sw_breakpoint(&mut self) -> Option<SwBreakpointOps<'_, Self>> {
         Some(self)
     }
 }

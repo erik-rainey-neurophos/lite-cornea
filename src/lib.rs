@@ -536,6 +536,30 @@ pub mod memory {
             } -> ReadRes
     );
 
+    #[derive(Deserialize, Debug, Default)]
+    #[serde(rename_all = "camelCase")]
+    pub struct WriteRes {
+        #[serde(default)]
+        pub error: Option<Value>,
+    }
+
+    // `data` holds `count` little-endian values of `width` bytes each (Iris packs
+    // them as JSON numbers). memory_read returns the symmetric ReadRes::data.
+    iris_rpc_fn!(
+        write "memory_write"
+            MemoryWriteReq {
+                #[serde(rename = "instId")]
+                id: u32,
+                #[serde(rename = "spaceId")]
+                space: u64,
+                address: u64,
+                #[serde(rename = "byteWidth")]
+                width: u64,
+                count: u64,
+                data: Vec<u64>,
+            } -> WriteRes
+    );
+
     #[derive(Deserialize, Debug)]
     #[serde(rename_all = "camelCase")]
     pub struct SidebandInfo {
@@ -737,19 +761,23 @@ pub mod simulation_time {
 }
 
 pub mod simulation {
+    // These Iris methods return an empty object `{}` on success, not `null`, so
+    // the result type must be tolerant -- `-> ()` only deserializes from `null`
+    // and would fail (killing the gdb session mid-monitor-command). Value accepts
+    // any JSON and is discarded by callers.
     iris_rpc_fn!(reset "simulation_reset"
         Reset {
             #[serde(rename = "instId")]
             id: u32,
             #[serde(rename = "allowPartialReset")]
             allow_partial: bool,
-        } -> ()
+        } -> serde_json::Value
     );
     iris_rpc_fn!(wait "simulation_waitForInstantiation"
          Wait {
             #[serde(rename = "instId")]
             id: u32,
-        } -> ()
+        } -> serde_json::Value
     );
 }
 
@@ -860,3 +888,4 @@ pub mod resource {
 
 pub use iris_client::FastModelIris;
 pub mod gdb;
+pub mod rtt;

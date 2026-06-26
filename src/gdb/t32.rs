@@ -1,4 +1,3 @@
-use std::borrow::Borrow;
 use std::collections::hash_map::{Entry, HashMap};
 use std::convert::TryInto;
 use std::io::{Error as IOError, Read, Stdin, Stdout, Write};
@@ -26,6 +25,7 @@ pub struct IrisGdbStub<'i> {
     pub instance_id: u32,
     sim: u32,
     breakpoints: HashMap<u32, u64>,
+    rtt: crate::rtt::Rtt,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -44,6 +44,7 @@ impl<'i> IrisGdbStub<'i> {
             instance_id,
             breakpoints: HashMap::new(),
             sim: sim.id,
+            rtt: crate::rtt::Rtt::default(),
         })
     }
 }
@@ -226,11 +227,17 @@ impl SingleThreadOps for IrisGdbStub<'_> {
                 .map_err(|_| ())?
                 .running
             {
+                // The target only produces RTT output while it runs, so pump the
+                // up channels here (no-op unless an `rtt server` is active).
+                self.rtt.poll(&mut *self.iris, self.instance_id);
                 if interrupt.pending() {
+                    self.rtt.flush(&mut *self.iris, self.instance_id);
                     simulation_time::stop(self.iris, self.sim).map_err(|_| ())?;
                     return Ok(StopReason::GdbInterrupt);
                 }
             }
+            // Drain anything emitted just before the stop.
+            self.rtt.flush(&mut *self.iris, self.instance_id);
             if act == ResumeAction::Step {
                 return Ok(StopReason::DoneStep);
             } else {
@@ -302,16 +309,72 @@ impl<'i> HwBreakpoint for IrisGdbStub<'i> {
     }
 }
 
+/// Parse a `0x`-prefixed hex or plain decimal unsigned integer.
+fn parse_u64(s: &str) -> Option<u64> {
+    let s = s.trim();
+    match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => s.parse::<u64>().ok(),
+    }
+}
+
 impl<'i> MonitorCmd for IrisGdbStub<'i> {
     fn handle_monitor_cmd(&mut self, cmd: &[u8], mut out: ConsoleOutput<'_>) -> Result<(), ()> {
-        match String::from_utf8_lossy(cmd).borrow() {
-            "reset" => {
-                simulation::reset(self.iris, self.sim, false).map_err(|_| ())?;
-                simulation::wait(self.iris, self.sim).map_err(|_| ())?;
+        let cmd = String::from_utf8_lossy(cmd);
+        let tokens: Vec<&str> = cmd.split_whitespace().collect();
+        match tokens.as_slice() {
+            [] => {}
+            // "reset" / "reset halt": reset and leave the core halted (the sim is
+            // stopped after reset, which is the halted state for a debug session).
+            // A SystemC EVS cannot re-elaborate, so Iris returns an error there --
+            // report it but keep the session alive (start the model halted with
+            // --iris-wait instead of resetting).
+            ["reset", ..] => match simulation::reset(self.iris, self.sim, false) {
+                Ok(_) => {
+                    let _ = simulation::wait(self.iris, self.sim);
+                    outputln!(out, "reset");
+                }
+                Err(e) => outputln!(out, "reset unavailable: {}", e),
+            },
+            // OpenOCD-style RTT control. The firmware .gdb script drives these.
+            ["rtt", "setup", addr, size, id_rest @ ..] => {
+                match (parse_u64(addr), parse_u64(size)) {
+                    (Some(addr), Some(size)) => {
+                        let id = if id_rest.is_empty() {
+                            "SEGGER RTT".to_string()
+                        } else {
+                            id_rest.join(" ").trim_matches('"').to_string()
+                        };
+                        self.rtt.setup(addr, size, id);
+                        outputln!(out, "rtt: search {:#x}..{:#x}", addr, addr + size);
+                    }
+                    _ => outputln!(out, "rtt setup <addr> <size> [id]: bad address/size"),
+                }
             }
-            c => {
-                outputln!(out, "Monitor command {} not supported", c);
+            ["rtt", "start"] => match self.rtt.start(&mut *self.iris, self.instance_id) {
+                Ok((cb, n)) => outputln!(out, "rtt: control block {:#x}, {} up channel(s)", cb, n),
+                Err(e) => outputln!(out, "rtt start: {}", e),
+            },
+            ["rtt", "server", "start", port, channel] => {
+                match (port.parse::<u16>().ok(), parse_u64(channel)) {
+                    (Some(port), Some(ch)) => {
+                        match self.rtt.server_start(port, ch as u32) {
+                            Ok(()) => outputln!(out, "rtt: channel {} -> 127.0.0.1:{}", ch, port),
+                            Err(e) => outputln!(out, "rtt server start: {}", e),
+                        }
+                    }
+                    _ => outputln!(out, "rtt server start <port> <channel>: bad args"),
+                }
             }
+            ["rtt", "server", "stop", port] => match port.parse::<u16>() {
+                Ok(port) => {
+                    let removed = self.rtt.server_stop(port);
+                    let state = if removed { "stopped" } else { "not running" };
+                    outputln!(out, "rtt: server :{} {}", port, state);
+                }
+                Err(_) => outputln!(out, "rtt server stop <port>: bad port"),
+            },
+            _ => outputln!(out, "Monitor command '{}' not supported", cmd.trim()),
         }
         Ok(())
     }

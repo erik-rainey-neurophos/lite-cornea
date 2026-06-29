@@ -310,7 +310,7 @@ impl<'i> HwBreakpoint for IrisGdbStub<'i> {
 }
 
 /// Parse a `0x`-prefixed hex or plain decimal unsigned integer.
-fn parse_u64(s: &str) -> Option<u64> {
+pub(crate) fn parse_u64(s: &str) -> Option<u64> {
     let s = s.trim();
     match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         Some(hex) => u64::from_str_radix(hex, 16).ok(),

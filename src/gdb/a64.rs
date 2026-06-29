@@ -103,6 +103,32 @@ impl<'i> IrisGdbStub<'i> {
             rtt: crate::rtt::Rtt::default(),
         })
     }
+
+    /// Resolve the memory space the CPU is currently using. Unlike the flat
+    /// Cortex-M map, ARMv8-A exposes several spaces (translation regimes); the
+    /// active one is published as the `PC_MEMSPACE` resource. Used by both
+    /// `read_addrs` and `write_addrs` so they target the same space.
+    fn pc_memspace(&mut self) -> Result<u64, ()> {
+        if self.resources.is_none() {
+            let resources =
+                resource::get_list(&mut self.iris, self.instance_id, None, None).map_err(|_| ())?;
+            self.resources = Some(resources);
+        }
+        let memspace_res = self
+            .resources
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|res| res.name == "PC_MEMSPACE")
+            .map(|res| res.id)
+            .ok_or(())?;
+        let memspace = *resource::read(&mut self.iris, self.instance_id, vec![memspace_res])
+            .map_err(|_| ())?
+            .data
+            .first()
+            .ok_or(())?;
+        Ok(memspace)
+    }
 }
 
 impl Registers for GuestState {
@@ -219,28 +245,12 @@ impl SingleThreadOps for IrisGdbStub<'_> {
     }
 
     fn read_addrs(&mut self, start_addr: u64, data: &mut [u8]) -> TargetResult<(), Self> {
-        if self.resources.is_none() {
-            let resources =
-                resource::get_list(&mut self.iris, self.instance_id, None, None).map_err(|_| ())?;
-            self.resources = Some(resources);
-        };
-        let mut memspace_res = Err(());
-        for res in self.resources.as_ref().unwrap() {
-            match res.name.as_str() {
-                "PC_MEMSPACE" => memspace_res = Ok(res.id),
-                _ => (),
-            }
-        }
-        let memspace_res = memspace_res?;
-        let memspace = *resource::read(&mut self.iris, self.instance_id, vec![memspace_res])?
-            .data
-            .get(0)
-            .ok_or(())?;
+        let memspace = self.pc_memspace()?;
         let mem = memory::read(
             &mut self.iris,
             self.instance_id,
             memspace,
-            start_addr as u64,
+            start_addr,
             1,
             data.len() as u64,
         )
@@ -259,7 +269,18 @@ impl SingleThreadOps for IrisGdbStub<'_> {
         Ok(())
     }
 
-    fn write_addrs(&mut self, _: u64, _: &[u8]) -> TargetResult<(), Self> {
+    fn write_addrs(&mut self, start_addr: u64, data: &[u8]) -> TargetResult<(), Self> {
+        let memspace = self.pc_memspace()?;
+        memory::write(
+            &mut self.iris,
+            self.instance_id,
+            memspace,
+            start_addr,
+            1,
+            data.len() as u64,
+            memory::pack_le(data),
+        )
+        .map_err(|_| ())?;
         Ok(())
     }
     fn write_registers(&mut self, regs: &GuestState) -> TargetResult<(), Self> {

@@ -130,6 +130,9 @@ struct ReadMemArgs {
     /// Type of the memory block
     #[clap(short, long)]
     group_by: Option<GroupBy>,
+    /// Memory space id to read from (default 0)
+    #[clap(short, long)]
+    space: Option<u64>,
 }
 
 #[derive(Parser, Debug)]
@@ -494,11 +497,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let instance = find_instance(&mut fvp, inst)?;
             let spaces = memory::spaces(&mut fvp, instance.id)?;
             let name_len = spaces.iter().map(|s| s.name.len()).max().unwrap_or(0);
-            println!("{:>name_len$} │ {}", "name", "description");
-            println!("{:═>name_len$}═╪═{:═<35}", "", "");
+            println!("{:>6} │ {:>name_len$} │ {}", "id", "name", "description");
+            println!("{:═>6}═╪═{:═>name_len$}═╪═{:═<35}", "", "", "");
             for space in &spaces {
                 println!(
-                    "{:>name_len$} │ {}",
+                    "{:>6} │ {:>name_len$} │ {}",
+                    space.id,
                     space.name,
                     space.description.as_deref().unwrap_or("")
                 );
@@ -509,11 +513,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             addr,
             size,
             group_by,
+            space,
         }) => {
             let instance = find_instance(&mut fvp, inst)?;
             let addr = u64::from_str_radix(&addr, 16)?;
             let size = u64::from_str_radix(&size.unwrap_or_else(|| "4".to_string()), 16)?;
-            let memory = memory::read(&mut fvp, instance.id, 0, addr, 1, size)?;
+            let memory = memory::read(&mut fvp, instance.id, space.unwrap_or(0), addr, 1, size)?;
             let buf: Vec<_> = memory
                 .data
                 .into_iter()

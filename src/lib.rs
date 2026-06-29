@@ -899,6 +899,25 @@ pub mod resource {
             resource_ids: Vec<u64>,
         } -> ResourceRead
     );
+
+    #[derive(Deserialize, Debug)]
+    pub struct ResourceWrite {
+        #[serde(default)]
+        pub error: Option<Value>,
+    }
+
+    // `data` holds one value per id in `resource_ids`, in the same order. Iris
+    // applies them to writable resources; read-only ids are rejected, so callers
+    // should filter by `rwMode` first.
+    iris_rpc_fn!(write "resource_write"
+        Write {
+            #[serde(rename = "instId")]
+            id: u32,
+            #[serde(rename = "rscIds")]
+            resource_ids: Vec<u64>,
+            data: Vec<u64>,
+        } -> ResourceWrite
+    );
 }
 
 pub use iris_client::FastModelIris;

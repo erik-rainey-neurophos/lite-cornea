@@ -217,8 +217,42 @@ impl SingleThreadOps for IrisGdbStub<'_> {
         .map_err(|_| ())?;
         Ok(())
     }
-    fn write_registers(&mut self, _: &GuestState) -> TargetResult<(), Self> {
-        // We don't support writing
+    fn write_registers(&mut self, regs: &GuestState) -> TargetResult<(), Self> {
+        for res in
+            resource::get_list(&mut self.iris, self.instance_id, None, None).map_err(|_| ())?
+        {
+            let regnum = match res.name.as_str() {
+                "R0" => 0,
+                "R1" => 1,
+                "R2" => 2,
+                "R3" => 3,
+                "R4" => 4,
+                "R5" => 5,
+                "R6" => 6,
+                "R7" => 7,
+                "R8" => 8,
+                "R9" => 9,
+                "R10" => 10,
+                "R11" => 11,
+                "R12" => 12,
+                "R13" => 13,
+                "R14" => 14,
+                "R15" => 15,
+                "XPSR" => 25,
+                _ => continue,
+            };
+            // Skip resources Iris reports as read-only.
+            if matches!(res.rw_mode.as_deref(), Some(mode) if !mode.contains('w')) {
+                continue;
+            }
+            resource::write(
+                &mut self.iris,
+                self.instance_id,
+                vec![res.id],
+                vec![regs.regs[regnum] as u64],
+            )
+            .map_err(|_| ())?;
+        }
         Ok(())
     }
 

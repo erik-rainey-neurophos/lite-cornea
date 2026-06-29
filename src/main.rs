@@ -48,6 +48,8 @@ enum Command {
     Reset,
     /// Read matching registers from an instance
     RegisterRead(ResourceReadArgs),
+    /// Write a value (hex) to a named register of an instance
+    RegisterWrite(RegisterWriteArgs),
     /// Provide a GDB server for the iris server over a pipe
     GdbProxy(InstanceArgs),
 }
@@ -154,6 +156,15 @@ struct ResourceReadArgs {
     inst: String,
     /// Resource to print from
     resource: String,
+}
+#[derive(Parser, Debug)]
+struct RegisterWriteArgs {
+    /// The name of the instance to write to
+    inst: String,
+    /// Exact register/resource name to write
+    resource: String,
+    /// Value to write (hex)
+    value: String,
 }
 #[derive(Parser, Debug)]
 struct ResourceOptionArgs {
@@ -449,6 +460,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+        }
+        RegisterWrite(RegisterWriteArgs {
+            inst,
+            resource,
+            value,
+        }) => {
+            let instance = find_instance(&mut fvp, inst)?;
+            let value = u64::from_str_radix(value.trim_start_matches("0x"), 16)?;
+            let res = resource::get_list(&mut fvp, instance.id, None, None)?
+                .into_iter()
+                .find(|res| res.name == resource)
+                .ok_or_else(|| format!("no resource named {}", resource))?;
+            if matches!(res.rw_mode.as_deref(), Some(mode) if !mode.contains('w')) {
+                return Err(format!("resource {} is read-only", res.name).into());
+            }
+            resource::write(&mut fvp, instance.id, vec![res.id], vec![value])?;
+            println!("wrote {:#x} to {}", value, res.name);
         }
         ChildList(OptionalInstanceArgs { inst }) => {
             let name = match inst.clone() {

@@ -457,6 +457,14 @@ impl<'i> MonitorCmd for IrisGdbStub<'i> {
                 }
                 Err(e) => outputln!(out, "reset unavailable: {}", e),
             },
+            // "halt": stop a free-running target (OpenOCD-style). In this
+            // synchronous bridge the sim only advances inside `resume`, so at the
+            // monitor prompt it is usually already stopped and this is a no-op;
+            // Ctrl-C is the async interrupt that halts while running.
+            ["halt", ..] => match simulation_time::stop(self.iris, self.sim) {
+                Ok(_) => outputln!(out, "halted"),
+                Err(e) => outputln!(out, "halt unavailable: {}", e),
+            },
             // OpenOCD-style RTT control. The firmware .gdb script drives these.
             ["rtt", "setup", addr, size, id_rest @ ..] => {
                 match (parse_u64(addr), parse_u64(size)) {

@@ -28,6 +28,7 @@ Both are single-threaded GDB targets backed by the same Iris RPC layer
 | Hardware watchpoints | ❌ | ✅ | **Parity gap — t32 not implemented** |
 | Watch-trigger event stream | ❌ | ✅ | a64 listens for `IRIS_BREAKPOINT_HIT` to report `StopReason::Watch` |
 | `monitor reset` (session-robust) | ✅ | ✅ | Reports Iris errors without dropping the session |
+| `monitor halt` | ✅ | ✅ | Stops the sim (OpenOCD-style); Ctrl-C is the async equivalent |
 | `monitor rtt …` (setup/start/server) | ✅ | ✅ | OpenOCD-style RTT control |
 
 ## Architecture-specific by design (not gaps)

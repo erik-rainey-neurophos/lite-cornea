@@ -204,7 +204,17 @@ impl SingleThreadOps for IrisGdbStub<'_> {
         Ok(())
     }
 
-    fn write_addrs(&mut self, _: u32, _: &[u8]) -> TargetResult<(), Self> {
+    fn write_addrs(&mut self, start_addr: u32, data: &[u8]) -> TargetResult<(), Self> {
+        memory::write(
+            self.iris,
+            self.instance_id,
+            0,
+            start_addr as u64,
+            1,
+            data.len() as u64,
+            memory::pack_le(data),
+        )
+        .map_err(|_| ())?;
         Ok(())
     }
     fn write_registers(&mut self, _: &GuestState) -> TargetResult<(), Self> {

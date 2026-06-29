@@ -543,8 +543,23 @@ pub mod memory {
         pub error: Option<Value>,
     }
 
-    // `data` holds `count` little-endian values of `width` bytes each (Iris packs
-    // them as JSON numbers). memory_read returns the symmetric ReadRes::data.
+    /// Pack a byte buffer into little-endian 64-bit words, matching the wire
+    /// format of ReadRes::data (8 bytes per word; the final word is zero-padded).
+    /// Use with byteWidth=1, count=bytes.len().
+    pub fn pack_le(bytes: &[u8]) -> Vec<u64> {
+        bytes
+            .chunks(8)
+            .map(|c| {
+                let mut buf = [0u8; 8];
+                buf[..c.len()].copy_from_slice(c);
+                u64::from_le_bytes(buf)
+            })
+            .collect()
+    }
+
+    // `data` holds the bytes packed little-endian into 64-bit words (see pack_le),
+    // with byteWidth=1 and count=number-of-bytes. memory_read returns the
+    // symmetric ReadRes::data.
     iris_rpc_fn!(
         write "memory_write"
             MemoryWriteReq {

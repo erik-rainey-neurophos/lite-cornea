@@ -40,6 +40,8 @@ enum Command {
     ChildList(OptionalInstanceArgs),
     /// Read memory from the prespective of an instance
     MemoryRead(ReadMemArgs),
+    /// Write bytes (hex string) to memory from the perspective of an instance
+    MemoryWrite(WriteMemArgs),
     /// Break at a pc range
     Break(ReadMemArgs),
     /// Reset the platform
@@ -131,6 +133,19 @@ struct ReadMemArgs {
 }
 
 #[derive(Parser, Debug)]
+struct WriteMemArgs {
+    /// The name of the instance to write to
+    inst: String,
+    /// Address to write to (hex)
+    addr: String,
+    /// Bytes to write as a hex string, e.g. "deadbeef"
+    data: String,
+    /// Memory space id to write to (default 0)
+    #[clap(short, long)]
+    space: Option<u64>,
+}
+
+#[derive(Parser, Debug)]
 struct ResourceReadArgs {
     /// The name of the instance to read from
     inst: String,
@@ -197,6 +212,18 @@ impl FromStr for GroupBy {
             _ => Err("".to_string())?,
         })
     }
+}
+
+fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let clean: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    let clean = clean.strip_prefix("0x").unwrap_or(&clean);
+    if clean.len() % 2 != 0 {
+        return Err("hex string must have an even number of digits".into());
+    }
+    (0..clean.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&clean[i..i + 2], 16).map_err(|e| e.into()))
+        .collect()
 }
 
 fn mismatch(xs: &[u8], ys: &[u8]) -> usize {
@@ -494,6 +521,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .flatten()
                 .collect();
             print_hex_dump(addr, &buf, group_by.unwrap_or(GroupBy::U8));
+        }
+        MemoryWrite(WriteMemArgs {
+            inst,
+            addr,
+            data,
+            space,
+        }) => {
+            let instance = find_instance(&mut fvp, inst)?;
+            let addr = u64::from_str_radix(&addr, 16)?;
+            let bytes = parse_hex_bytes(&data)?;
+            memory::write(
+                &mut fvp,
+                instance.id,
+                space.unwrap_or(0),
+                addr,
+                1,
+                bytes.len() as u64,
+                memory::pack_le(&bytes),
+            )?;
+            println!("wrote {} bytes @ {:#x}", bytes.len(), addr);
         }
         Break(ReadMemArgs {
             inst, addr, size, ..

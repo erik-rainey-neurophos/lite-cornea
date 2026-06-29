@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use gdbstub::arch::{Arch, RegId, Registers};
 use gdbstub::outputln;
 use gdbstub::target::ext::base::singlethread::{SingleThreadOps, StopReason};
-use gdbstub::target::ext::base::{BaseOps, ResumeAction};
+use gdbstub::target::ext::base::{
+    BaseOps, ResumeAction, SingleRegisterAccess, SingleRegisterAccessOps,
+};
 #[allow(unused)]
 use gdbstub::target::ext::breakpoints::{
     Breakpoints, BreakpointsOps, HwBreakpoint, HwBreakpointOps, HwWatchpoint, HwWatchpointOps,
@@ -155,6 +157,30 @@ impl RegId for Register {
     }
 }
 
+/// Map an Iris resource name to its index in the gdb register block, or `None`
+/// if the resource is not one of the registers gdb tracks. Single source of
+/// truth for the name<->index mapping used by all four register accessors.
+fn regnum_of(name: &str) -> Option<usize> {
+    Some(match name {
+        "PC" => 32,
+        "SP" => 31,
+        "XPSR" | "CPSR" => 33,
+        x if x.starts_with('X') => return x[1..].parse().ok(),
+        _ => return None,
+    })
+}
+
+/// Map a gdb register id to its index in the gdb register block.
+fn block_index(reg: &Register) -> usize {
+    use Register::*;
+    match reg {
+        X(n) => *n as usize,
+        SP => 31,
+        PC => 32,
+        XPSR => 33,
+    }
+}
+
 impl<'i> Target for IrisGdbStub<'i> {
     type Arch = Armv8aArch;
     type Error = ();
@@ -179,19 +205,9 @@ impl SingleThreadOps for IrisGdbStub<'_> {
             self.resources = Some(resources);
         };
         for res in self.resources.as_ref().unwrap() {
-            let regnum = match res.name.as_str() {
-                "PC" => 32,
-                "SP" => 31,
-                "XPSR" => 33,
-                "CPSR" => 33,
-                x if x.starts_with("X") => {
-                    if let Ok(regnum) = x[1..].parse() {
-                        regnum
-                    } else {
-                        continue;
-                    }
-                }
-                _ => continue,
+            let regnum = match regnum_of(&res.name) {
+                Some(regnum) => regnum,
+                None => continue,
             };
             let val =
                 resource::read(&mut self.iris, self.instance_id, vec![res.id]).map_err(|_| ())?;
@@ -253,19 +269,9 @@ impl SingleThreadOps for IrisGdbStub<'_> {
             self.resources = Some(resources);
         };
         for res in self.resources.as_ref().unwrap() {
-            let regnum = match res.name.as_str() {
-                "PC" => 32,
-                "SP" => 31,
-                "XPSR" => 33,
-                "CPSR" => 33,
-                x if x.starts_with("X") => {
-                    if let Ok(regnum) = x[1..].parse() {
-                        regnum
-                    } else {
-                        continue;
-                    }
-                }
-                _ => continue,
+            let regnum = match regnum_of(&res.name) {
+                Some(regnum) => regnum,
+                None => continue,
             };
             // Skip resources Iris reports as read-only.
             if matches!(res.rw_mode.as_deref(), Some(mode) if !mode.contains('w')) {
@@ -280,6 +286,10 @@ impl SingleThreadOps for IrisGdbStub<'_> {
             .map_err(|_| ())?;
         }
         Ok(())
+    }
+
+    fn single_register_access(&mut self) -> Option<SingleRegisterAccessOps<'_, (), Self>> {
+        Some(self)
     }
 
     fn resume(
@@ -335,6 +345,63 @@ impl SingleThreadOps for IrisGdbStub<'_> {
             }
         }
         Err(())
+    }
+}
+
+impl<'i> SingleRegisterAccess<()> for IrisGdbStub<'i> {
+    fn read_register(
+        &mut self,
+        _tid: (),
+        reg_id: Register,
+        dst: &mut [u8],
+    ) -> TargetResult<(), Self> {
+        let target = block_index(&reg_id);
+        if self.resources.is_none() {
+            let resources =
+                resource::get_list(&mut self.iris, self.instance_id, None, None).map_err(|_| ())?;
+            self.resources = Some(resources);
+        };
+        for res in self.resources.as_ref().unwrap() {
+            if regnum_of(&res.name) != Some(target) {
+                continue;
+            }
+            let val =
+                resource::read(&mut self.iris, self.instance_id, vec![res.id]).map_err(|_| ())?;
+            if let Some(&value) = val.data.first() {
+                let bytes = value.to_le_bytes();
+                let n = dst.len().min(bytes.len());
+                dst[..n].copy_from_slice(&bytes[..n]);
+            }
+            break;
+        }
+        Ok(())
+    }
+
+    fn write_register(&mut self, _tid: (), reg_id: Register, val: &[u8]) -> TargetResult<(), Self> {
+        let target = block_index(&reg_id);
+        let mut buf = [0u8; 8];
+        let n = val.len().min(buf.len());
+        buf[..n].copy_from_slice(&val[..n]);
+        let value = u64::from_le_bytes(buf);
+        if self.resources.is_none() {
+            let resources =
+                resource::get_list(&mut self.iris, self.instance_id, None, None).map_err(|_| ())?;
+            self.resources = Some(resources);
+        };
+        for res in self.resources.as_ref().unwrap() {
+            if regnum_of(&res.name) != Some(target) {
+                continue;
+            }
+            // Reject writes to resources Iris reports as read-only (NonFatal, so
+            // gdb reports the failure without dropping the session).
+            if matches!(res.rw_mode.as_deref(), Some(mode) if !mode.contains('w')) {
+                return Err(().into());
+            }
+            resource::write(&mut self.iris, self.instance_id, vec![res.id], vec![value])
+                .map_err(|_| ())?;
+            break;
+        }
+        Ok(())
     }
 }
 

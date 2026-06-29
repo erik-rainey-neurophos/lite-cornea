@@ -2,6 +2,7 @@ use std::collections::hash_map::{Entry, HashMap};
 use std::convert::TryInto;
 use std::io::{Error as IOError, Read, Stdin, Stdout, Write};
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::{Arc, Mutex};
 use std::thread::spawn;
 
 use gdbstub::arch::{Arch, RegId, Registers};
@@ -11,22 +12,37 @@ use gdbstub::target::ext::base::{
 };
 #[allow(unused)]
 use gdbstub::target::ext::breakpoints::{
-    Breakpoints, BreakpointsOps, HwBreakpoint, HwBreakpointOps, SwBreakpoint, SwBreakpointOps,
+    Breakpoints, BreakpointsOps, HwBreakpoint, HwBreakpointOps, HwWatchpoint, HwWatchpointOps,
+    SwBreakpoint, SwBreakpointOps, WatchKind,
 };
 use gdbstub::target::ext::monitor_cmd::{ConsoleOutput, MonitorCmd, MonitorCmdOps};
 use gdbstub::target::{Target, TargetResult};
 use gdbstub::{outputln, Connection};
 
+use serde::Deserialize;
+
 use crate::{
-    breakpoint, instance_registry, memory, resource, simulation, simulation_time, step,
-    FastModelIris,
+    breakpoint, event, event_stream, instance_registry, memory, resource, simulation,
+    simulation_time, step, FastModelIris,
 };
+
+#[derive(Debug, Deserialize)]
+struct WatchTrigger {
+    #[serde(rename = "ACCESS_RW")]
+    kind: String,
+    #[serde(rename = "ACCESS_ADDR")]
+    addr: u64,
+    #[serde(rename = "BPT_ID")]
+    id: u64,
+}
 
 pub struct IrisGdbStub<'i> {
     pub iris: &'i mut FastModelIris,
     pub instance_id: u32,
     sim: u32,
     breakpoints: HashMap<u32, u64>,
+    watchpoints: HashMap<u32, u64>,
+    last_watch_trigger: Arc<Mutex<Option<WatchTrigger>>>,
     rtt: crate::rtt::Rtt,
 }
 
@@ -41,10 +57,42 @@ impl<'i> IrisGdbStub<'i> {
             iris,
             "framework.SimulationEngine".to_string(),
         )?;
+        // Subscribe to breakpoint-hit events so a data watchpoint trigger can be
+        // turned into a gdb StopReason::Watch (the event carries which bpt fired
+        // and the accessed address). Mirrors the a64 stub.
+        let source = event::source(iris, instance_id, "IRIS_BREAKPOINT_HIT".to_string())?;
+        let last_watch_trigger = Arc::new(Mutex::new(None));
+        let _stream = event_stream::create(
+            iris,
+            Some(instance_id),
+            false,
+            iris.inst_id.unwrap(),
+            source.id,
+            false,
+            true,
+        )?;
+        let cb_last_watch_trigger = last_watch_trigger.clone();
+        iris.register_callback(
+            "ec_IRIS_BREAKPOINT_HIT".to_string(),
+            Box::new(move |mut params| {
+                if let Ok(ref mut trigger) = cb_last_watch_trigger.try_lock() {
+                    if let Some(watch_trigger) = params
+                        .as_object_mut()
+                        .and_then(|p| p.get_mut("fields"))
+                        .and_then(|f| serde_json::value::from_value(f.take()).ok())
+                    {
+                        **trigger = Some(watch_trigger);
+                    }
+                }
+                Ok(())
+            }),
+        );
         Ok(Self {
             iris,
             instance_id,
             breakpoints: HashMap::new(),
+            watchpoints: HashMap::new(),
+            last_watch_trigger,
             sim: sim.id,
             rtt: crate::rtt::Rtt::default(),
         })
@@ -311,6 +359,22 @@ impl SingleThreadOps for IrisGdbStub<'_> {
             if act == ResumeAction::Step {
                 return Ok(StopReason::DoneStep);
             } else {
+                if let Ok(mut locked) = self.last_watch_trigger.try_lock() {
+                    if let Some(trigger) = locked.take() {
+                        let kind = match trigger.kind.as_str() {
+                            "r" => WatchKind::Read,
+                            "w" => WatchKind::Write,
+                            "rw" => WatchKind::ReadWrite,
+                            _ => return Ok(StopReason::HwBreak),
+                        };
+                        let addr = self
+                            .watchpoints
+                            .iter()
+                            .find_map(|(k, v)| if *v == trigger.id { Some(*k) } else { None });
+                        let addr = addr.unwrap_or(trigger.addr as u32);
+                        return Ok(StopReason::Watch { kind, addr });
+                    }
+                }
                 return Ok(StopReason::HwBreak);
             }
         }
@@ -374,6 +438,10 @@ impl<'i> Breakpoints for IrisGdbStub<'i> {
         Some(self)
     }
 
+    fn hw_watchpoint(&mut self) -> Option<HwWatchpointOps<'_, Self>> {
+        Some(self)
+    }
+
     fn sw_breakpoint(&mut self) -> Option<SwBreakpointOps<'_, Self>> {
         Some(self)
     }
@@ -418,6 +486,62 @@ impl<'i> HwBreakpoint for IrisGdbStub<'i> {
         _: <Self::Arch as Arch>::BreakpointKind,
     ) -> TargetResult<bool, Self> {
         if let Entry::Occupied(ent) = self.breakpoints.entry(addr) {
+            if let Ok(()) = breakpoint::delete(self.iris, self.instance_id, *ent.get()) {
+                let _ = ent.remove_entry();
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        } else {
+            Ok(true)
+        }
+    }
+}
+
+fn kind_to_str(kind: WatchKind) -> String {
+    match kind {
+        WatchKind::Read => "r",
+        WatchKind::Write => "w",
+        WatchKind::ReadWrite => "rw",
+    }
+    .to_string()
+}
+
+impl<'i> HwWatchpoint for IrisGdbStub<'i> {
+    fn add_hw_watchpoint(
+        &mut self,
+        addr: <Self::Arch as Arch>::Usize,
+        kind: WatchKind,
+    ) -> TargetResult<bool, Self> {
+        if self.watchpoints.contains_key(&addr) {
+            return Ok(true);
+        }
+        // Cortex-M is a flat single-space map, so set one data breakpoint in
+        // space 0 (unlike a64, which sets one per memory space).
+        match breakpoint::set(
+            self.iris,
+            self.instance_id,
+            addr as u64,
+            Some(kind_to_str(kind)),
+            None,
+            Some(0),
+            crate::breakpoint::Type::Data,
+            false,
+            false,
+        ) {
+            Ok(id) => {
+                self.watchpoints.insert(addr, id);
+                Ok(true)
+            }
+            Err(_) => Ok(false),
+        }
+    }
+    fn remove_hw_watchpoint(
+        &mut self,
+        addr: <Self::Arch as Arch>::Usize,
+        _kind: WatchKind,
+    ) -> TargetResult<bool, Self> {
+        if let Entry::Occupied(ent) = self.watchpoints.entry(addr) {
             if let Ok(()) = breakpoint::delete(self.iris, self.instance_id, *ent.get()) {
                 let _ = ent.remove_entry();
                 Ok(true)

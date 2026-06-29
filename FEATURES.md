@@ -25,8 +25,8 @@ Both are single-threaded GDB targets backed by the same Iris RPC layer
 | RTT pump during `continue` | ✅ | ✅ | `rtt.poll`/`flush` in the resume loop |
 | Software breakpoints | ✅ | ✅ | Delegate to hardware breakpoints |
 | Hardware breakpoints | ✅ | ✅ | Via `breakpoint::code` |
-| Hardware watchpoints | ❌ | ✅ | **Parity gap — t32 not implemented** |
-| Watch-trigger event stream | ❌ | ✅ | a64 listens for `IRIS_BREAKPOINT_HIT` to report `StopReason::Watch` |
+| Hardware watchpoints | ✅ | ✅ | read/write/access; reported as `StopReason::Watch` |
+| Watch-trigger event stream | ✅ | ✅ | Both subscribe to `IRIS_BREAKPOINT_HIT` to map a data-bp hit to a watch stop |
 | `monitor reset` (session-robust) | ✅ | ✅ | Reports Iris errors without dropping the session |
 | `monitor halt` | ✅ | ✅ | Stops the sim (OpenOCD-style); Ctrl-C is the async equivalent |
 | `monitor rtt …` (setup/start/server) | ✅ | ✅ | OpenOCD-style RTT control |
@@ -43,15 +43,15 @@ parity:
   uses Iris space `0`. ARMv8-A exposes several spaces (translation regimes), so
   a64 resolves the active space from the `PC_MEMSPACE` resource
   (`pc_memspace` helper, shared by `read_addrs`/`write_addrs`).
-- **Breakpoint storage.** t32 stores a single Iris breakpoint id per address;
-  a64 stores a `Vec` of ids (one per memory space).
+- **Breakpoint/watchpoint storage.** t32 stores a single Iris breakpoint id per
+  address (flat space 0); a64 stores a `Vec` of ids, one per memory space.
 
 ## Known gaps & follow-ups
 
-- **t32 hardware watchpoints** — a64 implements `HwWatchpoint` (plus the
-  `IRIS_BREAKPOINT_HIT` event stream and watch-trigger plumbing that reports
-  `StopReason::Watch`); t32 does not. Bringing watchpoints to t32 would close
-  the last functional parity gap.
-- **a64 memory-write verification** — `write_addrs` on a64 is implemented and
-  mirrors the verified t32 path, but has only been exercised against a Cortex-M4F
-  (t32) model. It still needs confirmation against a real ARMv8-A target.
+The two stubs are now at full functional parity; the only open items are
+verification, not missing features:
+
+- **a64 verification on real hardware** — the a64-specific paths (`write_addrs`,
+  watchpoints, single-register access) mirror the t32 implementations but have
+  only been exercised against a Cortex-M4F (t32) model. They still need
+  confirmation against a real ARMv8-A target.

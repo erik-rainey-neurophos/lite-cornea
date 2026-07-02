@@ -1,8 +1,8 @@
 [package]
 name = "cornea"
-version = "0.1.0"
-authors = ["Jimmy Brisson <jimmy.brisson@arm.com>"]
-edition = "2018"
+version = "0.2.0"
+authors = ["Jimmy Brisson <jimmy.brisson@arm.com>", "Erik Rainey <erik@neurophos.com>"]
+edition = "2024"
 
 [dependencies]
 serde_json = "1.0"

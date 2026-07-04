@@ -353,6 +353,14 @@ impl SingleThreadOps for IrisGdbStub<'_> {
                     simulation_time::stop(self.iris, self.sim).map_err(|_| ())?;
                     return Ok(StopReason::GdbInterrupt);
                 }
+                // Throttle the run-state poll: an unthrottled tight loop hammers
+                // the Iris IPC right after the async simulationTime_run and
+                // intermittently desyncs it, so the proxy reports a bogus stop and
+                // gdb/model disagree on run state (the "Cannot execute ... target is
+                // running" seen under scripted continue/step). A small sleep both
+                // rate-limits the IPC and lets the run take effect. Kept short so
+                // instruction single-stepping stays responsive. Matches a64.rs.
+                std::thread::sleep(std::time::Duration::from_millis(2));
             }
             // Drain anything emitted just before the stop.
             self.rtt.flush(&mut *self.iris, self.instance_id);

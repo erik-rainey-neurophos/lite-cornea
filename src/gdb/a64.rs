@@ -336,7 +336,10 @@ impl SingleThreadOps for IrisGdbStub<'_> {
                     simulation_time::stop(self.iris, self.sim).map_err(|_| ())?;
                     return Ok(StopReason::GdbInterrupt);
                 }
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                // Throttle the run-state poll to rate-limit the Iris IPC (see the
+                // matching comment in t32.rs). Kept short so instruction
+                // single-stepping stays responsive.
+                std::thread::sleep(std::time::Duration::from_millis(2));
             }
             // Drain anything emitted just before the stop.
             self.rtt.flush(&mut *self.iris, self.instance_id);

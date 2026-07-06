@@ -22,14 +22,39 @@ Both are single-threaded GDB targets backed by the same Iris RPC layer
 | Memory write (`write_addrs`) | ✅ | ✅ | Shared `memory::write` + `pack_le` path |
 | Resume: step & continue | ✅ | ✅ | Polls `simulation_time` until halt |
 | GDB interrupt (Ctrl-C) | ✅ | ✅ | Stops the sim, returns `GdbInterrupt` |
-| RTT pump during `continue` | ✅ | ✅ | `rtt.poll`/`flush` in the resume loop |
+| RTT pump during `continue` (bidirectional) | ✅ | ✅ | `rtt.poll`/`flush` in the resume loop: up channels → TCP, client input → down channels |
 | Software breakpoints | ✅ | ✅ | Delegate to hardware breakpoints |
 | Hardware breakpoints | ✅ | ✅ | Via `breakpoint::code` |
 | Hardware watchpoints | ✅ | ✅ | read/write/access; reported as `StopReason::Watch` |
 | Watch-trigger event stream | ✅ | ✅ | Both subscribe to `IRIS_BREAKPOINT_HIT` to map a data-bp hit to a watch stop |
 | `monitor reset` (session-robust) | ✅ | ✅ | Reports Iris errors without dropping the session |
 | `monitor halt` | ✅ | ✅ | Stops the sim (OpenOCD-style); Ctrl-C is the async equivalent |
-| `monitor rtt …` (setup/start/server) | ✅ | ✅ | OpenOCD-style RTT control |
+| `monitor rtt …` (setup/start/server) | ✅ | ✅ | OpenOCD-style RTT control; `server start` opens a bidirectional TCP channel |
+
+## RTT (bidirectional)
+
+RTT is host-side polling of a SEGGER RTT control block in target RAM over Iris
+memory access — there is no trace hardware. `src/rtt.rs` finds the control block,
+drains the up buffers (target → host) out to loopback TCP servers, and writes
+bytes received from those sockets into the matching down buffer (host → target).
+The same channel index serves both directions, so a connected client is a full
+terminal. Driven from gdb over the proxy, OpenOCD-style:
+
+    monitor rtt setup <addr> <size> [id]     # search region + control-block ID
+    monitor rtt start                        # locate the control block
+    monitor rtt server start <port> <chan>   # loopback TCP for up+down of <chan>
+    monitor rtt server stop <port>
+    continue                                 # RTT only flows while the target runs
+
+Then attach any TCP client (`nc localhost <port>`, an RTT terminal): its output
+is the up channel; keystrokes go to the down channel. Caveats:
+
+- Data only moves during `continue` (the pump runs in the resume loop, throttled).
+  Input typed at a halted prompt is buffered and flushed on the next resume.
+- Input requires the firmware to read its down buffer (`SEGGER_RTT_Read`/`GetKey`).
+- Servers bind `127.0.0.1` only; SSH-forward the port for a remote FVP.
+- A channel with no down buffer silently drops input (bounds-checked); the
+  per-channel host → target backlog is capped at 64 KiB.
 
 ## Architecture-specific by design (not gaps)
 

@@ -18,3 +18,7 @@ rss:
 	
 @fvp-port:
          lsof -c FVP -P | awk '$5 == "IPv4" { split($9, s, ":"); if (s[1] == "localhost") print s[2]; exit }'
+
+# Build in release and install `cornea` to ~/.local/bin.
+install:
+	cargo install --path . --root "$HOME/.local"
